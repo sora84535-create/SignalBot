@@ -282,7 +282,7 @@ async def cmd_smc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     args = ctx.args or []
     symbol = (args[0].upper().replace("/", "_").replace("USDT", "_USDT")
-              if args else "BTC_USDT")
+              if args else "BTCUSDT")
     if not symbol.endswith("_USDT"):
         symbol += "_USDT"
     tf = args[1] if len(args) > 1 else "1h"
@@ -382,7 +382,7 @@ async def cmd_ai(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         market_data = {}
         try:
             from src.utils.mexc_client import mexc
-            ticker = await mexc.get_futures_ticker("BTC_USDT")
+            ticker = await mexc.get_futures_ticker("BTCUSDT")
             market_data["btc_price"] = float(ticker.get("lastPrice", 0))
         except Exception:
             pass

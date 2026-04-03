@@ -124,7 +124,7 @@ class MarketContextEngine:
 
     # ── Funding rates ─────────────────────────────────────────────
     async def _fetch_funding(self) -> Dict[str, float]:
-        symbols = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "BNB_USDT",
+        symbols = ["BTCUSDT", "ETH_USDT", "SOL_USDT", "BNB_USDT",
                    "XRP_USDT", "DOGE_USDT", "ADA_USDT", "AVAX_USDT"]
         result = {}
         for sym in symbols:
@@ -178,7 +178,7 @@ class MarketContextEngine:
 
         # BTC price from MEXC
         try:
-            ticker = await mexc.get_futures_ticker("BTC_USDT")
+            ticker = await mexc.get_futures_ticker("BTCUSDT")
             ctx.btc_price      = float(ticker.get("lastPrice", 0))
             ctx.btc_change_24h = float(ticker.get("priceChangePercent", 0) or 0)
         except Exception:
