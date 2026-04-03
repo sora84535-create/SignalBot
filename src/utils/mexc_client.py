@@ -1,206 +1,117 @@
-"""
-MEXC REST API client (futures + spot).
-Handles authentication, rate-limits, retries.
-"""
-
 import asyncio
-import hashlib
-import hmac
-import time
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
-
 import aiohttp
-
 from config.settings import settings
 from src.utils.logger import setup_logger
 
-logger = setup_logger("mexc_api")
+logger = setup_logger("api")
 
-_RETRY_CODES = {429, 500, 502, 503, 504}
-_MAX_RETRIES  = 3
-_RETRY_DELAY  = 1.5   # seconds
+BINANCE_FUTURES = "https://fapi.binance.com"
+BINANCE_SPOT = "https://api.binance.com"
+MEXC_SPOT = "https://api.mexc.com"
+MEXC_FUTURES = "https://contract.mexc.com"
 
+TF_MAP = {"Min1":"1m","Min5":"5m","Min15":"15m","Min30":"30m","Min60":"1h","Hour4":"4h","Hour8":"8h","Day1":"1d","1m":"1m","5m":"5m","15m":"15m","1h":"1h","4h":"4h","1d":"1d"}
 
 class MexcAPIError(Exception):
     pass
 
-
 class MexcClient:
-    """Async MEXC API client — futures + spot."""
-
     def __init__(self):
         self._session: Optional[aiohttp.ClientSession] = None
 
-    # ── Session ──────────────────────────────────────────────────
-    async def _get_session(self) -> aiohttp.ClientSession:
+    async def _sess(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=15)
-            self._session = aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept": "application/json"})
+            self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), headers={"User-Agent":"Mozilla/5.0","Accept":"application/json"})
         return self._session
 
     async def close(self):
         if self._session and not self._session.closed:
             await self._session.close()
 
-    # ── Signing ──────────────────────────────────────────────────
-    def _sign(self, params: Dict) -> str:
-        ts = str(int(time.time() * 1000))
-        params["timestamp"] = ts
-        query = urlencode(sorted(params.items()))
-        sig = hmac.new(
-            settings.MEXC_API_SECRET.encode(),
-            query.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        return sig
-
-    # ── Generic request ──────────────────────────────────────────
-    async def _request(
-        self,
-        method: str,
-        base_url: str,
-        path: str,
-        params: Dict = None,
-        signed: bool = False,
-    ) -> Any:
-        params = params or {}
-        if signed:
-            sig = self._sign(params)
-            params["signature"] = sig
-
-        url = base_url + path
-        session = await self._get_session()
-        headers = {"X-MEXC-APIKEY": settings.MEXC_API_KEY} if signed else {}
-
-        for attempt in range(_MAX_RETRIES):
+    async def _get(self, url: str, params: dict = None) -> Any:
+        session = await self._sess()
+        for i in range(3):
             try:
-                async with session.request(
-                    method, url, params=params, headers=headers
-                ) as resp:
-                    if resp.status in _RETRY_CODES:
-                        await asyncio.sleep(_RETRY_DELAY * (attempt + 1))
-                        continue
-                    data = await resp.json()
-                    if resp.status != 200:
-                        raise MexcAPIError(
-                            f"HTTP {resp.status}: {data}"
-                        )
-                    return data
-            except aiohttp.ClientError as e:
-                if attempt == _MAX_RETRIES - 1:
-                    raise MexcAPIError(f"Request failed: {e}") from e
-                await asyncio.sleep(_RETRY_DELAY)
+                async with session.get(url, params=params or {}) as r:
+                    if r.status in {429,500,502,503,504}:
+                        await asyncio.sleep(1.5*(i+1)); continue
+                    return await r.json(content_type=None)
+            except Exception as e:
+                if i == 2: raise MexcAPIError(f"Request failed: {e}")
+                await asyncio.sleep(1.5)
 
-        raise MexcAPIError("Max retries exceeded")
+    def _sym(self, s: str) -> str:
+        return s.replace("_","").replace("/","")
 
-    # ══════════════════════════════════════════════════════════════
-    #  FUTURES endpoints
-    # ══════════════════════════════════════════════════════════════
+    async def get_futures_klines(self, symbol: str, interval: str = "Min15", limit: int = 200) -> dict:
+        tf = TF_MAP.get(interval, "15m")
+        data = await self._get(f"{BINANCE_FUTURES}/fapi/v1/klines", {"symbol":self._sym(symbol),"interval":tf,"limit":limit})
+        if not isinstance(data, list): return {}
+        t,o,h,l,c,v = [],[],[],[],[],[]
+        for k in data:
+            t.append(k[0]);o.append(k[1]);h.append(k[2]);l.append(k[3]);c.append(k[4]);v.append(k[5])
+        return {"time":t,"open":o,"high":h,"low":l,"close":c,"vol":v}
 
-    async def get_futures_symbols(self) -> List[Dict]:
-        """All active futures contracts."""
-        data = await self._request(
-            "GET", settings.MEXC_BASE_URL, "/api/v1/contract/detail"
-        )
-        return data.get("data", [])
+    async def get_spot_klines(self, symbol: str, interval: str = "15m", limit: int = 200) -> list:
+        tf = TF_MAP.get(interval, interval)
+        data = await self._get(f"{BINANCE_SPOT}/api/v3/klines", {"symbol":self._sym(symbol),"interval":tf,"limit":limit})
+        return data if isinstance(data, list) else []
 
-    async def get_futures_klines(
-        self,
-        symbol: str,
-        interval: str = "Min15",
-        limit: int = 200,
-    ) -> List[Dict]:
-        """
-        Futures klines.
-        interval: Min1 Min5 Min15 Min30 Min60 Hour4 Hour8 Day1 Week1 Month1
-        """
-        params = {"symbol": symbol, "interval": interval, "limit": limit}
-        data = await self._request(
-            "GET", settings.MEXC_BASE_URL, "/api/v1/contract/kline", params
-        )
-        return data.get("data", {})
+    async def get_futures_ticker(self, symbol: str) -> dict:
+        try:
+            data = await self._get(f"{BINANCE_FUTURES}/fapi/v1/ticker/24hr", {"symbol":self._sym(symbol)})
+            return {"lastPrice":data.get("lastPrice",0),"priceChangePercent":data.get("priceChangePercent",0)}
+        except: return {}
 
-    async def get_futures_ticker(self, symbol: str) -> Dict:
-        params = {"symbol": symbol}
-        data = await self._request(
-            "GET", settings.MEXC_BASE_URL, "/api/v1/contract/ticker", params
-        )
-        return data.get("data", {})
+    async def get_futures_funding_rate(self, symbol: str) -> dict:
+        try:
+            data = await self._get(f"{BINANCE_FUTURES}/fapi/v1/fundingRate", {"symbol":self._sym(symbol),"limit":1})
+            if isinstance(data, list) and data: return {"fundingRate":float(data[0].get("fundingRate",0))}
+        except: pass
+        return {"fundingRate": 0}
 
-    async def get_futures_orderbook(self, symbol: str, depth: int = 10) -> Dict:
-        params = {"symbol": symbol, "depth": depth}
-        data = await self._request(
-            "GET", settings.MEXC_BASE_URL, "/api/v1/contract/depth", params
-        )
-        return data.get("data", {})
+    async def get_futures_symbols(self) -> list:
+        try:
+            data = await self._get(f"{BINANCE_FUTURES}/fapi/v1/exchangeInfo")
+            return [{"symbol":s["symbol"].replace("USDT","_USDT"),"state":"open"} for s in data.get("symbols",[]) if s.get("status")=="TRADING" and s.get("quoteAsset")=="USDT"]
+        except: return []
 
-    async def get_futures_funding_rate(self, symbol: str) -> Dict:
-        params = {"symbol": symbol}
-        data = await self._request(
-            "GET", settings.MEXC_BASE_URL, "/api/v1/contract/funding_rate", params
-        )
-        return data.get("data", {})
-
-    async def get_futures_open_interest(self, symbol: str) -> Dict:
-        params = {"symbol": symbol}
-        data = await self._request(
-            "GET", settings.MEXC_BASE_URL, "/api/v1/contract/open_interest", params
-        )
-        return data.get("data", {})
-
-    async def get_all_futures_tickers(self) -> List[Dict]:
-        data = await self._request(
-            "GET", settings.MEXC_BASE_URL, "/api/v1/contract/ticker"
-        )
-        return data.get("data", [])
-
-    # ══════════════════════════════════════════════════════════════
-    #  SPOT endpoints
-    # ══════════════════════════════════════════════════════════════
-
-    async def get_spot_symbols(self) -> List[Dict]:
-        data = await self._request(
-            "GET", settings.MEXC_SPOT_URL, "/api/v3/exchangeInfo"
-        )
-        return data.get("symbols", [])
-
-    async def get_spot_klines(
-        self,
-        symbol: str,
-        interval: str = "15m",
-        limit: int = 200,
-    ) -> List[List]:
-        params = {"symbol": symbol, "interval": interval, "limit": limit}
-        return await self._request(
-            "GET", settings.MEXC_SPOT_URL, "/api/v3/klines", params
-        )
+    async def get_all_futures_tickers(self) -> list:
+        try:
+            data = await self._get(f"{BINANCE_FUTURES}/fapi/v1/ticker/24hr")
+            return [{"symbol":d["symbol"].replace("USDT","_USDT"),"lastPrice":d.get("lastPrice",0),"priceChangePercent":d.get("priceChangePercent",0)} for d in data if d.get("symbol","").endswith("USDT")]
+        except: return []
 
     async def get_spot_price(self, symbol: str) -> float:
-        params = {"symbol": symbol}
-        data = await self._request(
-            "GET", settings.MEXC_SPOT_URL, "/api/v3/ticker/price", params
-        )
-        return float(data.get("price", 0))
+        try:
+            data = await self._get(f"{BINANCE_SPOT}/api/v3/ticker/price", {"symbol":self._sym(symbol)})
+            return float(data.get("price", 0))
+        except: return 0.0
 
-    async def get_spot_24h(self, symbol: str) -> Dict:
-        params = {"symbol": symbol}
-        data = await self._request(
-            "GET", settings.MEXC_SPOT_URL, "/api/v3/ticker/24hr", params
-        )
-        return data
+    async def get_spot_24h(self, symbol: str) -> dict:
+        try:
+            return await self._get(f"{BINANCE_SPOT}/api/v3/ticker/24hr", {"symbol":self._sym(symbol)})
+        except: return {}
 
-    async def get_all_spot_prices(self) -> List[Dict]:
-        return await self._request(
-            "GET", settings.MEXC_SPOT_URL, "/api/v3/ticker/price"
-        )
+    async def get_all_spot_prices(self) -> list:
+        try:
+            return await self._get(f"{BINANCE_SPOT}/api/v3/ticker/price")
+        except: return []
 
-    async def get_spot_orderbook(self, symbol: str, limit: int = 10) -> Dict:
-        params = {"symbol": symbol, "limit": limit}
-        return await self._request(
-            "GET", settings.MEXC_SPOT_URL, "/api/v3/depth", params
-        )
+    async def get_futures_orderbook(self, symbol: str, depth: int = 10) -> dict:
+        try:
+            return await self._get(f"{BINANCE_FUTURES}/fapi/v1/depth", {"symbol":self._sym(symbol),"limit":depth})
+        except: return {}
 
+    async def get_futures_open_interest(self, symbol: str) -> dict:
+        try:
+            return await self._get(f"{BINANCE_FUTURES}/fapi/v1/openInterest", {"symbol":self._sym(symbol)})
+        except: return {}
 
-# Singleton
+    async def get_spot_orderbook(self, symbol: str, limit: int = 10) -> dict:
+        try:
+            return await self._get(f"{BINANCE_SPOT}/api/v3/depth", {"symbol":self._sym(symbol),"limit":limit})
+        except: return {}
+
 mexc = MexcClient()
