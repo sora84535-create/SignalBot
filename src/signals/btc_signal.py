@@ -64,7 +64,7 @@ class BTCSignal:
 class BTCSignalEngine:
 
     async def get_signal(self, timeframe: str = "1h") -> Optional[BTCSignal]:
-        symbol   = "BTC_USDT"
+        symbol = "BTCUSDT"
         interval = TF_MAP.get(timeframe, "Min60")
 
         try:
