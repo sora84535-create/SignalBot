@@ -725,7 +725,7 @@ class TelegramBot:
         await app.initialize()
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
-        await app.updater.idle()
+        await asyncio.Event().wait()
 
     async def stop(self):
         if self._app:
